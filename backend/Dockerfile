@@ -8,8 +8,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-# Backend code (main_gemini.py becomes main.py) + the prebuilt vector DB
-COPY main_gemini.py ./main.py
+# Backend code + the prebuilt vector DB
+COPY main.py ./main.py
 COPY fiqh_chroma_db_gemini ./fiqh_chroma_db_gemini
 
 # GEMINI_API_KEY is NOT baked in: set it as an environment variable on the host

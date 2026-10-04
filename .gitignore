@@ -1,0 +1,19 @@
+# secrets: never commit these
+.env
+**/.env
+
+# python
+__pycache__/
+*.pyc
+test/
+venv/
+.venv/
+
+# old index built with the HuggingFace model (not needed anymore)
+fiqh_chroma_db/
+
+# frontend
+node_modules/
+dist/
+
+# NOTE: backend/fiqh_chroma_db_gemini/ must NOT be listed here, it has to be pushed
