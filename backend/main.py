@@ -22,8 +22,8 @@ GEMINI_API_KEY = os.environ.get(
     "GEMINI_API_KEY",)
 # MODEL_NAME = "gemini-3.6-flash"
 MODEL_NAME = "gemini-3.1-flash-lite"
-DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-DB_DIR = os.path.join(DATA_DIR, "fiqh_chroma_db")
+DATA_DIR = "data/*.json"
+DB_DIR = "fiqh_chroma_db"
 
 app = FastAPI(title="Bayyina API", version="1.0.0")
 
