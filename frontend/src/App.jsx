@@ -676,8 +676,10 @@ export default function App() {
     if (isLoading) return;
     setSidebarOpen(false);
 
-    // English question (no Arabic letters) => answer + UI in English
-    const reqLang = /[\u0600-\u06FF]/.test(question) ? lang : 'en';
+    // Answer language follows the question's script (majority); UI follows it too
+    const arCount = (question.match(/[\u0600-\u06FF]/g) || []).length;
+    const enCount = (question.match(/[A-Za-z]/g) || []).length;
+    const reqLang = arCount > enCount ? 'ar' : enCount > arCount ? 'en' : lang;
     if (reqLang !== lang) setLang(reqLang);
 
     const msgId = Date.now();

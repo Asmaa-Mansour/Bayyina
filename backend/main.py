@@ -358,14 +358,17 @@ User message: {query}"""
 
 
 
-def resolve_lang(question: str, lang: str) -> str:
-    """An English question (no Arabic letters) always gets an English answer,
-    even if the client sent a stale/default lang='ar'."""
-    if lang not in ("ar", "en"):
-        lang = "ar"
-    if not re.search(r"[\u0600-\u06FF]", question):
+def resolve_lang(question: str, lang: str = "ar") -> str:
+    """The answer language follows the language of the question itself
+    (majority script), not the UI toggle. The toggle is only a tie-breaker."""
+    arabic = len(re.findall(r"[\u0600-\u06FF]", question))
+    latin = len(re.findall(r"[A-Za-z]", question))
+    if arabic > latin:
+        return "ar"
+    if latin > arabic:
         return "en"
-    return lang
+    return lang if lang in ("ar", "en") else "ar"
+
 
 # ==========================================
 # Routes
