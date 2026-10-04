@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+langchain-core
+langchain-huggingface
+langchain-community
+chromadb
+openai
+sentence-transformers
