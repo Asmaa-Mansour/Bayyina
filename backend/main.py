@@ -8,6 +8,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
+load_dotenv()
 
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
