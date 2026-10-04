@@ -19,7 +19,7 @@ from google.genai import types
 # Config
 # ==========================================
 GEMINI_API_KEY = os.environ.get(
-    "GEMINI_API_KEY")
+    "GEMINI_API_KEY",)
 # MODEL_NAME = "gemini-3.6-flash"
 MODEL_NAME = "gemini-3.1-flash-lite"
 DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
