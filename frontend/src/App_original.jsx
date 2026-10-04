@@ -366,7 +366,6 @@ function WelcomeScreen({ onSuggest }) {
 // FORMATTED TEXT (minimal markdown bold)
 // ══════════════════════════════════════════════════════════
 function FormattedText({ text }) {
-  const { lang } = useLang();
   if (!text) return null;
   
   // Isolate the literal Arabic text robustly (handling missing asterisks or colons)
@@ -399,7 +398,7 @@ function FormattedText({ text }) {
         <div className="literal-quote-block" dir="rtl">
           <div className="literal-quote-icon">
             <Icon.Book />
-            <span>{lang === 'en' ? 'Original Arabic Text' : 'النص الحرفي'}</span>
+            <span>النص الحرفي</span>
           </div>
           <div className="literal-quote-text">
             {renderBasicBold(literalText.trim())}
@@ -645,10 +644,7 @@ function InputArea({ onSubmit, isLoading }) {
 // ══════════════════════════════════════════════════════════
 export default function App() {
   /* ── State ── */
-  const [lang,       setLang]       = useState(() => {
-    try { return localStorage.getItem('bayyina-lang') === 'en' ? 'en' : 'ar'; }
-    catch { return 'ar'; }
-  });
+  const [lang,       setLang]       = useState('ar');
   const [theme,      setTheme]      = useState('light');
   const [messages,   setMessages]   = useState([]);
   const [isLoading,  setIsLoading]  = useState(false);
@@ -663,7 +659,6 @@ export default function App() {
     html.setAttribute('data-theme', theme);
     html.setAttribute('dir', lang === 'ar' ? 'rtl' : 'ltr');
     html.setAttribute('lang', lang);
-    try { localStorage.setItem('bayyina-lang', lang); } catch { /* ignore */ }
   }, [theme, lang]);
 
   /* ── Scroll to bottom ── */
@@ -675,10 +670,6 @@ export default function App() {
   const handleQuestion = useCallback(async (question) => {
     if (isLoading) return;
     setSidebarOpen(false);
-
-    // English question (no Arabic letters) => answer + UI in English
-    const reqLang = /[\u0600-\u06FF]/.test(question) ? lang : 'en';
-    if (reqLang !== lang) setLang(reqLang);
 
     const msgId = Date.now();
     const emptyAnswers   = { hanafi:'', hanbali:'', shafii:'', maliki:'' };
@@ -700,7 +691,7 @@ export default function App() {
       setMessages(prev => prev.map(m => m.id === msgId ? updater(m) : m));
 
     try {
-      for await (const ev of streamAllMadhhabs(question, reqLang)) {
+      for await (const ev of streamAllMadhhabs(question, lang)) {
         const { type, madhhab, text } = ev;
 
         // ── GUARDRAILS: general single-card events ──

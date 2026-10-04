@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import shutil
 import asyncio
 from typing import AsyncGenerator
@@ -129,30 +128,6 @@ class QuestionRequest(BaseModel):
     lang: str = "ar"
 
 
-
-# ==========================================
-# System prompts (language is enforced here, not only in the user prompt)
-# ==========================================
-EN_FIQH_SYSTEM = """You are a strict Islamic Fiqh assistant.
-LANGUAGE RULE (absolute): the user's interface language is ENGLISH. Write your ENTIRE answer in English, even though the source texts and possibly the question are in Arabic. Translate book names, chapter names and rulings into English. The ONLY Arabic allowed is the verbatim quote after the "**النص الحرفي:**" header.
-Answer ONLY from the provided source texts. Do not invent anything. If the answer is not in the texts, say exactly: "No answer was found in the provided texts."
-
-Use EXACTLY this template:
-**Book:** [book name in English]
-**Chapter:** [chapter in English]
-**Page:** [page number]
-**Ruling:** [concise ruling points in English]
-**النص الحرفي:** [exact Arabic quote, untranslated]"""
-
-AR_FIQH_SYSTEM = """أنت خبير فقهي صارم. اللغة المطلوبة: العربية.
-أجب عن سؤال المستخدم استناداً **فقط** على النصوص المرفقة. إذا لم تكن الإجابة في النص، قل "لا توجد إجابة في النصوص المرفقة". لا تؤلف أي معلومة.
-رتّب إجابتك كالتالي:
-**الكتاب:** [اسم الكتاب]
-**الباب:** [الباب]
-**رقم الصفحة:** [الصفحة]
-**الحكم المذكور:** [نقاط مختصرة]
-**النص الحرفي:** [اقتباس]"""
-
 # ==========================================
 # Streaming answer generator
 # ==========================================
@@ -180,36 +155,48 @@ async def stream_answer(query: str, madhhab: str, lang: str = "ar") -> AsyncGene
         yield "data: [DONE]\n\n"
         return
 
-    is_en = lang == "en"
-    if is_en:
-        labels = ("Book", "Chapter", "Page", "Source text (Arabic)")
-    else:
-        labels = ("الكتاب", "الباب", "الصفحة", "النص")
-
     context = ""
     for doc in relevant_docs:
         context += (
             f"\n---\n"
-            f"{labels[0]}: {doc.metadata['book']}\n"
-            f"{labels[1]}: {doc.metadata['chapter']} - {doc.metadata['section']}\n"
-            f"{labels[2]}: {doc.metadata['page_from']}\n"
-            f"{labels[3]}:\n{doc.page_content}\n"
+            f"الكتاب: {doc.metadata['book']}\n"
+            f"الباب: {doc.metadata['chapter']} - {doc.metadata['section']}\n"
+            f"الصفحة: {doc.metadata['page_from']}\n"
+            f"النص:\n{doc.page_content}\n"
         )
 
-    if is_en:
-        system_instruction = EN_FIQH_SYSTEM
-        prompt_text = f"""Source texts (these are in Arabic, but your answer must be in ENGLISH):
+    if lang == "en":
+        prompt_text = f"""
+CRITICAL INSTRUCTION: You are an expert Fiqh assistant. You MUST write your ENTIRE response in ENGLISH, except for the final quote. Do not reply in Arabic!
+
+Follow this EXACT template with these EXACT English headers:
+**Book:** [Translate book name to English]
+**Chapter:** [Translate chapter to English]
+**Page:** [Page number]
+**Ruling:** [Write the ruling summary in ENGLISH]
+**النص الحرفي:** [Quote the exact Arabic text. DO NOT TRANSLATE THIS QUOTE. Keep it in original Arabic]
+
+Arabic Source Texts:
 {context}
 
-User question: {query}
-
-Reminder: write everything in ENGLISH using exactly the template from your instructions. Only the line after "**النص الحرفي:**" stays in Arabic."""
+Question: {query}
+"""
     else:
-        system_instruction = AR_FIQH_SYSTEM
-        prompt_text = f"""النصوص المرفقة:
+        prompt_text = f"""
+أنت خبير فقهي صارم. أجب عن سؤال المستخدم استناداً **فقط** على النصوص المرفقة أدناه.
+إذا لم تكن الإجابة في النص، قل "لا توجد إجابة في النصوص المرفقة". لا تؤلف أي معلومة.
+رتّب إجابتك كالتالي:
+**الكتاب:** [اسم الكتاب]
+**الباب:** [الباب]
+**رقم الصفحة:** [الصفحة]
+**الحكم المذكور:** [نقاط مختصرة]
+**النص الحرفي:** [اقتباس]
+
+النصوص المرفقة:
 {context}
 
-السؤال: {query}"""
+السؤال: {query}
+"""
 
     client = genai.Client(api_key=GEMINI_API_KEY)
     
@@ -220,7 +207,6 @@ Reminder: write everything in ENGLISH using exactly the template from your instr
                 model=MODEL_NAME,
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
                     temperature=0.1,
                     max_output_tokens=2000
                 )
@@ -337,8 +323,6 @@ User message: {query}"""
                 model=MODEL_NAME,
                 contents=persona_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=("Reply ONLY in English, even if the user writes in Arabic."
-                                        if lang == "en" else "أجب بالعربية فقط."),
                     temperature=0.4,
                     max_output_tokens=600
                 )
@@ -357,16 +341,6 @@ User message: {query}"""
         yield "data: [DONE]\n\n"
 
 
-
-def resolve_lang(question: str, lang: str) -> str:
-    """An English question (no Arabic letters) always gets an English answer,
-    even if the client sent a stale/default lang='ar'."""
-    if lang not in ("ar", "en"):
-        lang = "ar"
-    if not re.search(r"[\u0600-\u06FF]", question):
-        return "en"
-    return lang
-
 # ==========================================
 # Routes
 # ==========================================
@@ -384,9 +358,8 @@ async def ask_question(req: QuestionRequest):
     if req.madhhab not in madhhabs:
         raise HTTPException(status_code=400, detail=f"المذهب غير صالح. الخيارات: {madhhabs}")
 
-    lang = resolve_lang(req.question, req.lang)
     return StreamingResponse(
-        stream_answer(req.question, req.madhhab, lang),
+        stream_answer(req.question, req.madhhab),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -401,9 +374,6 @@ async def ask_all_madhhabs(req: QuestionRequest):
     if vectorstore is None:
         raise HTTPException(status_code=503, detail="قاعدة البيانات لم تُحمَّل بعد.")
 
-    lang = resolve_lang(req.question, req.lang)
-    print(f"[Bayyina] /ask-all lang requested={req.lang!r} resolved={lang!r}")
-
     # ── GUARDRAILS: Classify intent first ──
     intent = await classify_intent(req.question)
 
@@ -411,7 +381,7 @@ async def ask_all_madhhabs(req: QuestionRequest):
         # Route to guarded single-card persona response
         async def general_stream():
             yield "data: [GENERAL_START]\n\n"
-            async for chunk in stream_general_response(req.question, lang):
+            async for chunk in stream_general_response(req.question, req.lang):
                 yield chunk
             yield "data: [GENERAL_END]\n\n"
             yield "data: [ALL_DONE]\n\n"
@@ -427,7 +397,7 @@ async def ask_all_madhhabs(req: QuestionRequest):
         madhhabs =  ["hanafi", "maliki" , "shafii","hanbali" ]
         for m in madhhabs:
             yield f"data: [MADHHAB_START:{m}]\n\n"
-            async for chunk in stream_answer(req.question, m, lang):
+            async for chunk in stream_answer(req.question, m, req.lang):
                 yield chunk
             yield f"data: [MADHHAB_END:{m}]\n\n"
             await asyncio.sleep(1.5)  # Prevent upstream 429 rate limit
