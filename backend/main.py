@@ -1,10 +1,13 @@
 import json
 import os
 import re
-import shutil
+import sys
+import time
 import asyncio
-from typing import AsyncGenerator
+from dataclasses import dataclass, field
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -12,23 +15,31 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 load_dotenv()
 
-from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+import chromadb
 from google import genai
 from google.genai import types
 
 # ==========================================
 # Config
 # ==========================================
-GEMINI_API_KEY = os.environ.get(
-    "GEMINI_API_KEY",)
-# MODEL_NAME = "gemini-3.6-flash"
-MODEL_NAME = "gemini-3.1-flash-lite"
-DATA_DIR = "data/*.json"
-DB_DIR = "fiqh_chroma_db"
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set (put it in .env or the environment).")
 
-app = FastAPI(title="Bayyina API", version="1.0.0")
+MODEL_NAME = "gemini-3.1-flash-lite"
+
+EMBED_MODEL = "gemini-embedding-001"
+EMBED_DIM = 768            # 768 / 1536 / 3072. Smaller = smaller DB, still good quality.
+EMBED_BATCH = 5            # small batches: free tier has a tokens-per-minute cap
+EMBED_MAX_CHARS = 6000     # embed only the first N chars of a doc (model limit ~2048 tokens); full text is still stored
+EMBED_TOKENS_PER_MIN = 20000   # stay safely under the free-tier TPM limit (check your limit at ai.dev/rate-limit)
+EMBED_MIN_INTERVAL = 1.0   # seconds between calls (RPM safety)
+DB_COMPLETE_MARKER = ".complete"
+
+DATA_DIR = "data"          # folder that contains the JSON files
+DB_DIR = "fiqh_chroma_db_gemini"   # NEW folder: old DB vectors are incompatible
+
+app = FastAPI(title="Bayyina API", version="1.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -38,8 +49,96 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global vectorstore (loaded once at startup)
-vectorstore = None
+# Global vectorstore + embeddings (loaded once at startup)
+vectorstore = None   # chromadb collection
+embeddings: Optional["GeminiEmbeddings"] = None
+
+# One shared Gemini client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+
+
+@dataclass
+class Doc:
+    page_content: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+def open_collection():
+    """Open (or create) the Chroma collection directly, without langchain.
+    'langchain' is the collection name used by the earlier langchain-based build,
+    so an index built before this change keeps working."""
+    client = chromadb.PersistentClient(path=DB_DIR)
+    try:
+        return client.get_collection("langchain")
+    except Exception:
+        return client.create_collection("langchain")
+
+
+# ==========================================
+# Gemini embeddings (API-based, no torch)
+# ==========================================
+class GeminiEmbeddings:
+    """Embeddings backed by the Gemini API."""
+
+    def __init__(self, client: genai.Client):
+        self.client = client
+        self._next_allowed = 0.0
+
+    def _throttle(self, texts: List[str]):
+        """Space out calls so we stay under the free-tier tokens/minute limit."""
+        est_tokens = sum(len(t) for t in texts) / 2.5   # conservative for Arabic
+        wait_for = max(EMBED_MIN_INTERVAL, est_tokens / EMBED_TOKENS_PER_MIN * 60)
+        now = time.time()
+        if now < self._next_allowed:
+            time.sleep(self._next_allowed - now)
+        self._next_allowed = time.time() + wait_for
+
+    @staticmethod
+    def _normalize(vectors: List[List[float]]) -> List[List[float]]:
+        # Gemini only pre-normalizes the full 3072-dim output; do it for smaller dims.
+        arr = np.array(vectors, dtype=np.float32)
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        return (arr / norms).tolist()
+
+    def _embed_batch(self, texts: List[str], task_type: str, retries: int = 6) -> List[List[float]]:
+        delay = 2.0
+        for attempt in range(retries):
+            self._throttle(texts)
+            try:
+                res = self.client.models.embed_content(
+                    model=EMBED_MODEL,
+                    contents=texts,
+                    config=types.EmbedContentConfig(
+                        task_type=task_type,
+                        output_dimensionality=EMBED_DIM,
+                    ),
+                )
+                return self._normalize([e.values for e in res.embeddings])
+            except Exception as e:
+                if attempt == retries - 1:
+                    raise
+                msg = str(e)
+                if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                    # Honour the server's suggested delay if present, otherwise wait out the 1-minute window
+                    m = re.search(r"retry in ([\d.]+)s|retryDelay['\"]?:\s*['\"]?(\d+)", msg)
+                    suggested = float(m.group(1) or m.group(2)) if m else 0
+                    wait_s = max(suggested + 2, 62)
+                else:
+                    wait_s = delay
+                    delay *= 2
+                print(f"[Embeddings] {type(e).__name__} -> waiting {wait_s:.0f}s "
+                      f"(attempt {attempt + 1}/{retries})")
+                time.sleep(wait_s)
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        out: List[List[float]] = []
+        for i in range(0, len(texts), EMBED_BATCH):
+            out.extend(self._embed_batch(texts[i:i + EMBED_BATCH], "RETRIEVAL_DOCUMENT"))
+        return out
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed_batch([text], "RETRIEVAL_QUERY")[0]
 
 
 # ==========================================
@@ -82,7 +181,7 @@ def load_fiqh_data():
                     "section": item.get("subtitle", "غير محدد") if item.get("subtitle") else "غير محدد",
                     "page_from": item.get("page_from", 0),
                 }
-                documents.append(Document(page_content=full_text, metadata=metadata))
+                documents.append(Doc(page_content=full_text, metadata=metadata))
 
     process_json_file("al_ikhtiyar_tahara_chapters.json", "hanafi", "الاختيار لتعليل المختار")
     process_json_file("zad_almustaqni_kitab_altahara.json", "hanbali", "زاد المستقنع")
@@ -92,31 +191,65 @@ def load_fiqh_data():
     return documents
 
 
+def build_index():
+    """Resumable index build. Progress is saved after every batch, so if the
+    free quota runs out you can simply run it again later (even the next day)
+    and it continues where it stopped."""
+    emb = GeminiEmbeddings(gemini_client)
+    vs = open_collection()
+
+    docs = load_fiqh_data()
+    if not docs:
+        raise ValueError("No JSON files found in the data folder.")
+
+    ids = [f"doc-{i}" for i in range(len(docs))]
+    existing = set(vs.get(include=[])["ids"])
+    todo = [(i, d) for i, d in zip(ids, docs) if i not in existing]
+    print(f"[Build] total={len(docs)} already_indexed={len(existing)} remaining={len(todo)}")
+
+    for start in range(0, len(todo), EMBED_BATCH):
+        batch = todo[start:start + EMBED_BATCH]
+        texts = [d.page_content[:EMBED_MAX_CHARS] for _, d in batch]
+        try:
+            vecs = emb.embed_documents(texts)
+        except Exception as e:
+            print(f"\n[Build] Stopped: {type(e).__name__}: {str(e)[:200]}")
+            print(f"[Build] Progress saved ({len(existing) + start}/{len(docs)}). "
+                  f"Run the build again later (daily quota resets at midnight Pacific time).")
+            sys.exit(1)
+
+        vs.upsert(
+            ids=[i for i, _ in batch],
+            documents=[d.page_content for _, d in batch],   # full text stored
+            metadatas=[d.metadata for _, d in batch],
+            embeddings=vecs,
+        )
+        print(f"[Build] {len(existing) + start + len(batch)}/{len(docs)}")
+
+    with open(os.path.join(DB_DIR, DB_COMPLETE_MARKER), "w") as f:
+        f.write("ok")
+    print("[Build] Done.")
+
+
 def setup_vector_db():
-    print("[Bayyina] Loading Arabic embeddings model...")
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
+    emb = GeminiEmbeddings(gemini_client)
 
-    if os.path.exists(DB_DIR):
-        print("[Bayyina] DB found, loading...")
-        vs = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-    else:
-        print("[Bayyina] Building DB for the first time...")
-        docs = load_fiqh_data()
-        if not docs:
-            raise ValueError("No JSON files found.")
-        vs = Chroma.from_documents(docs, embeddings, persist_directory=DB_DIR)
-        print(f"[Bayyina] Added {len(docs)} documents successfully.")
+    if not os.path.exists(os.path.join(DB_DIR, DB_COMPLETE_MARKER)):
+        raise RuntimeError(
+            f"Index '{DB_DIR}' is missing or incomplete. Run:  python main_gemini.py build"
+        )
 
-    return vs
+    print("[Bayyina] DB found, loading...")
+    vs = open_collection()
+    print(f"[Bayyina] Collection has {vs.count()} documents.")
+    return vs, emb
 
 
 @app.on_event("startup")
 async def startup_event():
-    global vectorstore
+    global vectorstore, embeddings
     print("[Bayyina] Initializing vector database...")
-    vectorstore = setup_vector_db()
+    vectorstore, embeddings = setup_vector_db()
     print("[Bayyina] Startup complete!")
 
 
@@ -127,7 +260,6 @@ class QuestionRequest(BaseModel):
     question: str
     madhhab: str  # hanafi | hanbali | shafii | maliki
     lang: str = "ar"
-
 
 
 # ==========================================
@@ -153,11 +285,31 @@ AR_FIQH_SYSTEM = """أنت خبير فقهي صارم. اللغة المطلوب
 **الحكم المذكور:** [نقاط مختصرة]
 **النص الحرفي:** [اقتباس]"""
 
+
+# ==========================================
+# Retrieval helper (uses a pre-computed query vector)
+# ==========================================
+def retrieve_by_vector(query_vec: List[float], madhhab: str, k: int = 12):
+    res = vectorstore.query(
+        query_embeddings=[query_vec],
+        n_results=k,
+        where={"madhhab": madhhab},
+        include=["documents", "metadatas"],
+    )
+    docs = res["documents"][0]
+    metas = res["metadatas"][0]
+    return [Doc(page_content=d, metadata=m) for d, m in zip(docs, metas)]
+
+
 # ==========================================
 # Streaming answer generator
 # ==========================================
-async def stream_answer(query: str, madhhab: str, lang: str = "ar") -> AsyncGenerator[str, None]:
-    global vectorstore
+async def stream_answer(
+    query: str,
+    madhhab: str,
+    lang: str = "ar",
+    query_vec: Optional[List[float]] = None,
+) -> AsyncGenerator[str, None]:
 
     madhhab_names = {
         "hanafi": "الحنفي",
@@ -166,16 +318,27 @@ async def stream_answer(query: str, madhhab: str, lang: str = "ar") -> AsyncGene
         "maliki": "المالكي",
     }
 
-    retriever = vectorstore.as_retriever(
-        search_kwargs={"k": 12, "filter": {"madhhab": madhhab}}
-    )
-
-    # Run blocking retrieval in thread pool
     loop = asyncio.get_event_loop()
-    relevant_docs = await loop.run_in_executor(None, retriever.invoke, query)
+
+    try:
+        # Embed the query ONLY if the caller did not already do it
+        if query_vec is None:
+            query_vec = await loop.run_in_executor(None, embeddings.embed_query, query)
+
+        relevant_docs = await loop.run_in_executor(
+            None, retrieve_by_vector, query_vec, madhhab
+        )
+    except Exception as e:
+        yield f"data: [ERROR] {str(e)}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     if not relevant_docs:
-        error_msg = "No answer found in the attached texts." if lang == "en" else f"لم يتم العثور على نصوص تخص هذا السؤال في المذهب {madhhab_names.get(madhhab, madhhab)}."
+        error_msg = (
+            "No answer found in the attached texts."
+            if lang == "en"
+            else f"لم يتم العثور على نصوص تخص هذا السؤال في المذهب {madhhab_names.get(madhhab, madhhab)}."
+        )
         yield f"data: {error_msg}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -211,25 +374,22 @@ Reminder: write everything in ENGLISH using exactly the template from your instr
 
 السؤال: {query}"""
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    
     try:
         completion = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content_stream(
+            lambda: gemini_client.models.generate_content_stream(
                 model=MODEL_NAME,
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
                     system_instruction=system_instruction,
                     temperature=0.1,
-                    max_output_tokens=2000
-                )
+                    max_output_tokens=2000,
+                ),
             ),
         )
 
         for chunk in completion:
             if chunk.text:
-                # SSE format
                 escaped = chunk.text.replace("\n", "\\n")
                 yield f"data: {escaped}\n\n"
 
@@ -249,7 +409,6 @@ async def classify_intent(query: str) -> str:
     Returns 'FIQH' if the query is a valid Islamic Fiqh question,
     or 'GENERAL' for greetings, jailbreak attempts, or off-topic questions.
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
     loop = asyncio.get_event_loop()
 
     classify_prompt = f"""Read the user's text and classify it.
@@ -263,28 +422,24 @@ Reply with ONLY the number 1 or 2:"""
     try:
         response = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content(
+            lambda: gemini_client.models.generate_content(
                 model=MODEL_NAME,
                 contents=classify_prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
-                    max_output_tokens=600
-                )
+                    max_output_tokens=600,
+                ),
             ),
         )
         content = response.text
         if content is None:
-            print(f"[Guardrails] LLM returned None content. Defaulting to FIQH.")
+            print("[Guardrails] LLM returned None content. Defaulting to FIQH.")
             return "FIQH"
-            
+
         label = content.strip()
         print(f"[Guardrails] LLM Output for '{query[:50]}' -> raw='{label}'")
-        
-        if "2" in label:
-            intent = "GENERAL"
-        else:
-            intent = "FIQH"
-            
+
+        intent = "GENERAL" if "2" in label else "FIQH"
         print(f"[Guardrails] Classified as -> {intent}")
         return intent
     except Exception as e:
@@ -302,7 +457,6 @@ async def stream_general_response(query: str, lang: str = "ar") -> AsyncGenerato
     The AI is locked into the Bayyina persona and CANNOT comply
     with jailbreak attempts or off-topic requests.
     """
-    client = genai.Client(api_key=GEMINI_API_KEY)
     loop = asyncio.get_event_loop()
 
     if lang == "en":
@@ -333,15 +487,17 @@ User message: {query}"""
     try:
         completion = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content_stream(
+            lambda: gemini_client.models.generate_content_stream(
                 model=MODEL_NAME,
                 contents=persona_prompt,
                 config=types.GenerateContentConfig(
-                    system_instruction=("Reply ONLY in English, even if the user writes in Arabic."
-                                        if lang == "en" else "أجب بالعربية فقط."),
+                    system_instruction=(
+                        "Reply ONLY in English, even if the user writes in Arabic."
+                        if lang == "en" else "أجب بالعربية فقط."
+                    ),
                     temperature=0.4,
-                    max_output_tokens=600
-                )
+                    max_output_tokens=600,
+                ),
             ),
         )
 
@@ -355,7 +511,6 @@ User message: {query}"""
     except Exception as e:
         yield f"data: [ERROR] {str(e)}\n\n"
         yield "data: [DONE]\n\n"
-
 
 
 def resolve_lang(question: str, lang: str = "ar") -> str:
@@ -373,6 +528,9 @@ def resolve_lang(question: str, lang: str = "ar") -> str:
 # ==========================================
 # Routes
 # ==========================================
+MADHHABS = ["hanafi", "maliki", "shafii", "hanbali"]
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "db_loaded": vectorstore is not None}
@@ -383,18 +541,14 @@ async def ask_question(req: QuestionRequest):
     if vectorstore is None:
         raise HTTPException(status_code=503, detail="قاعدة البيانات لم تُحمَّل بعد.")
 
-    madhhabs = ["hanafi", "maliki" , "shafii","hanbali" ]
-    if req.madhhab not in madhhabs:
-        raise HTTPException(status_code=400, detail=f"المذهب غير صالح. الخيارات: {madhhabs}")
+    if req.madhhab not in MADHHABS:
+        raise HTTPException(status_code=400, detail=f"المذهب غير صالح. الخيارات: {MADHHABS}")
 
     lang = resolve_lang(req.question, req.lang)
     return StreamingResponse(
-        stream_answer(req.question, req.madhhab, lang),
+        stream_answer(req.question, req.madhhab, lang),  # embeds the query once itself
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
@@ -411,7 +565,6 @@ async def ask_all_madhhabs(req: QuestionRequest):
     intent = await classify_intent(req.question)
 
     if intent == "GENERAL":
-        # Route to guarded single-card persona response
         async def general_stream():
             yield "data: [GENERAL_START]\n\n"
             async for chunk in stream_general_response(req.question, lang):
@@ -425,12 +578,17 @@ async def ask_all_madhhabs(req: QuestionRequest):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    # ── FIQH: Normal 4-Madhhab stream ──
+    # ── FIQH: embed the query ONCE, reuse the vector for all 4 madhhabs ──
+    loop = asyncio.get_event_loop()
+    try:
+        query_vec = await loop.run_in_executor(None, embeddings.embed_query, req.question)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Embedding failed: {e}")
+
     async def combined_stream():
-        madhhabs =  ["hanafi", "maliki" , "shafii","hanbali" ]
-        for m in madhhabs:
+        for m in MADHHABS:
             yield f"data: [MADHHAB_START:{m}]\n\n"
-            async for chunk in stream_answer(req.question, m, lang):
+            async for chunk in stream_answer(req.question, m, lang, query_vec=query_vec):
                 yield chunk
             yield f"data: [MADHHAB_END:{m}]\n\n"
             await asyncio.sleep(1.5)  # Prevent upstream 429 rate limit
@@ -439,8 +597,17 @@ async def ask_all_madhhabs(req: QuestionRequest):
     return StreamingResponse(
         combined_stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ==========================================
+# Build the index offline:  python main_gemini.py build
+# ==========================================
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "build":
+        build_index()
+        print(f"Deploy the '{DB_DIR}' folder together with the code.")
+    else:
+        print("Usage: python main_gemini.py build   (to build the index)")
+        print("Run the server with: uvicorn main_gemini:app --host 0.0.0.0 --port 8000")
