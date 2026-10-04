@@ -354,7 +354,7 @@ async def ask_question(req: QuestionRequest):
     if vectorstore is None:
         raise HTTPException(status_code=503, detail="قاعدة البيانات لم تُحمَّل بعد.")
 
-    madhhabs = ["hanafi", "hanbali", "shafii", "maliki"]
+    madhhabs = ["hanafi", "maliki" , "shafii","hanbali" ]
     if req.madhhab not in madhhabs:
         raise HTTPException(status_code=400, detail=f"المذهب غير صالح. الخيارات: {madhhabs}")
 
@@ -394,7 +394,7 @@ async def ask_all_madhhabs(req: QuestionRequest):
 
     # ── FIQH: Normal 4-Madhhab stream ──
     async def combined_stream():
-        madhhabs = ["hanafi", "hanbali", "shafii", "maliki"]
+        madhhabs =  ["hanafi", "maliki" , "shafii","hanbali" ]
         for m in madhhabs:
             yield f"data: [MADHHAB_START:{m}]\n\n"
             async for chunk in stream_answer(req.question, m, req.lang):
