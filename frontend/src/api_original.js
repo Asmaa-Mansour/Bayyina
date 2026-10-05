@@ -5,37 +5,15 @@
 // Falls back to localhost for local development.
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
 
-// ── User-supplied Gemini API key (stored in this browser only) ──
-const KEY_STORAGE = 'bayyina-gemini-key';
-
-export const getApiKey = () => {
-  try { return localStorage.getItem(KEY_STORAGE) || ''; } catch { return ''; }
-};
-export const setApiKey = (k) => { try { localStorage.setItem(KEY_STORAGE, k.trim()); } catch { /* ignore */ } };
-export const clearApiKey = () => { try { localStorage.removeItem(KEY_STORAGE); } catch { /* ignore */ } };
-
-const authHeaders = (key = getApiKey()) => (key ? { 'X-Gemini-Key': key } : {});
-
-export async function validateApiKey(key) {
-  const res = await fetch(`${API_URL}/validate-key`, {
-    method: 'POST',
-    headers: authHeaders(key),
-  });
-  if (!res.ok) throw new Error('invalid');
-  return true;
-}
-
 export async function* streamAllMadhhabs(question, lang = 'ar') {
   const response = await fetch(`${API_URL}/ask-all`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, madhhab: 'all', lang }), // madhhab is required by Pydantic model
   });
 
   if (!response.ok) {
-    const err = new Error(`HTTP ${response.status}: ${response.statusText}`);
-    err.status = response.status;
-    throw err;
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
 
   const reader = response.body.getReader();

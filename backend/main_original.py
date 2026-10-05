@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -22,9 +22,9 @@ from google.genai import types
 # ==========================================
 # Config
 # ==========================================
-# Optional fallback key (also used by `python main.py build`).
-# Users can supply their own key from the frontend (X-Gemini-Key header).
-DEFAULT_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY is not set (put it in .env or the environment).")
 
 MODEL_NAME = "gemini-3.1-flash-lite"
 
@@ -51,21 +51,10 @@ app.add_middleware(
 
 # Global vectorstore + embeddings (loaded once at startup)
 vectorstore = None   # chromadb collection
+embeddings: Optional["GeminiEmbeddings"] = None
 
-# Gemini clients, cached per API key
-_clients: Dict[str, genai.Client] = {}
-
-
-def get_client(user_key: Optional[str] = None) -> genai.Client:
-    """Return a Gemini client for the user's key, or the .env key as fallback."""
-    key = (user_key or "").strip() or DEFAULT_KEY
-    if not key:
-        raise HTTPException(status_code=401, detail="Gemini API key required.")
-    if key not in _clients:
-        if len(_clients) > 50:
-            _clients.clear()
-        _clients[key] = genai.Client(api_key=key)
-    return _clients[key]
+# One shared Gemini client
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 @dataclass
@@ -206,7 +195,7 @@ def build_index():
     """Resumable index build. Progress is saved after every batch, so if the
     free quota runs out you can simply run it again later (even the next day)
     and it continues where it stopped."""
-    emb = GeminiEmbeddings(get_client(None))
+    emb = GeminiEmbeddings(gemini_client)
     vs = open_collection()
 
     docs = load_fiqh_data()
@@ -243,22 +232,24 @@ def build_index():
 
 
 def setup_vector_db():
+    emb = GeminiEmbeddings(gemini_client)
+
     if not os.path.exists(os.path.join(DB_DIR, DB_COMPLETE_MARKER)):
         raise RuntimeError(
-            f"Index '{DB_DIR}' is missing or incomplete. Run:  python main.py build"
+            f"Index '{DB_DIR}' is missing or incomplete. Run:  python main_gemini.py build"
         )
 
     print("[Bayyina] DB found, loading...")
     vs = open_collection()
     print(f"[Bayyina] Collection has {vs.count()} documents.")
-    return vs
+    return vs, emb
 
 
 @app.on_event("startup")
 async def startup_event():
-    global vectorstore
+    global vectorstore, embeddings
     print("[Bayyina] Initializing vector database...")
-    vectorstore = setup_vector_db()
+    vectorstore, embeddings = setup_vector_db()
     print("[Bayyina] Startup complete!")
 
 
@@ -318,10 +309,8 @@ async def stream_answer(
     madhhab: str,
     lang: str = "ar",
     query_vec: Optional[List[float]] = None,
-    client: Optional[genai.Client] = None,
 ) -> AsyncGenerator[str, None]:
 
-    client = client or get_client(None)
     madhhab_names = {
         "hanafi": "الحنفي",
         "hanbali": "الحنبلي",
@@ -334,7 +323,7 @@ async def stream_answer(
     try:
         # Embed the query ONLY if the caller did not already do it
         if query_vec is None:
-            query_vec = await loop.run_in_executor(None, GeminiEmbeddings(client).embed_query, query)
+            query_vec = await loop.run_in_executor(None, embeddings.embed_query, query)
 
         relevant_docs = await loop.run_in_executor(
             None, retrieve_by_vector, query_vec, madhhab
@@ -388,7 +377,7 @@ Reminder: write everything in ENGLISH using exactly the template from your instr
     try:
         completion = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content_stream(
+            lambda: gemini_client.models.generate_content_stream(
                 model=MODEL_NAME,
                 contents=prompt_text,
                 config=types.GenerateContentConfig(
@@ -414,7 +403,7 @@ Reminder: write everything in ENGLISH using exactly the template from your instr
 # ==========================================
 # Intent Classifier (Guardrails Layer)
 # ==========================================
-async def classify_intent(query: str, client: genai.Client) -> str:
+async def classify_intent(query: str) -> str:
     """
     100% LLM-based intent classification.
     Returns 'FIQH' if the query is a valid Islamic Fiqh question,
@@ -433,7 +422,7 @@ Reply with ONLY the number 1 or 2:"""
     try:
         response = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content(
+            lambda: gemini_client.models.generate_content(
                 model=MODEL_NAME,
                 contents=classify_prompt,
                 config=types.GenerateContentConfig(
@@ -462,7 +451,7 @@ Reply with ONLY the number 1 or 2:"""
 # ==========================================
 # General Persona Response (Guardrails)
 # ==========================================
-async def stream_general_response(query: str, lang: str = "ar", client: Optional[genai.Client] = None) -> AsyncGenerator[str, None]:
+async def stream_general_response(query: str, lang: str = "ar") -> AsyncGenerator[str, None]:
     """
     Streams a guarded response for non-Fiqh queries.
     The AI is locked into the Bayyina persona and CANNOT comply
@@ -498,7 +487,7 @@ User message: {query}"""
     try:
         completion = await loop.run_in_executor(
             None,
-            lambda: client.models.generate_content_stream(
+            lambda: gemini_client.models.generate_content_stream(
                 model=MODEL_NAME,
                 contents=persona_prompt,
                 config=types.GenerateContentConfig(
@@ -547,24 +536,8 @@ async def health():
     return {"status": "ok", "db_loaded": vectorstore is not None}
 
 
-@app.post("/validate-key")
-async def validate_key(x_gemini_key: Optional[str] = Header(None)):
-    """Check that a user-supplied key works before the frontend saves it."""
-    client = get_client(x_gemini_key)
-    loop = asyncio.get_event_loop()
-    try:
-        await loop.run_in_executor(None, lambda: client.models.embed_content(
-            model=EMBED_MODEL, contents="test",
-            config=types.EmbedContentConfig(output_dimensionality=EMBED_DIM)))
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid or unusable API key.")
-    return {"ok": True}
-
-
 @app.post("/ask")
-async def ask_question(req: QuestionRequest, x_gemini_key: Optional[str] = Header(None)):
-    print(x_gemini_key)
-    client = get_client(x_gemini_key)
+async def ask_question(req: QuestionRequest):
     if vectorstore is None:
         raise HTTPException(status_code=503, detail="قاعدة البيانات لم تُحمَّل بعد.")
 
@@ -573,16 +546,15 @@ async def ask_question(req: QuestionRequest, x_gemini_key: Optional[str] = Heade
 
     lang = resolve_lang(req.question, req.lang)
     return StreamingResponse(
-        stream_answer(req.question, req.madhhab, lang, client=client),  # embeds the query once itself
+        stream_answer(req.question, req.madhhab, lang),  # embeds the query once itself
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
 @app.post("/ask-all")
-async def ask_all_madhhabs(req: QuestionRequest, x_gemini_key: Optional[str] = Header(None)):
+async def ask_all_madhhabs(req: QuestionRequest):
     """Ask all 4 madhhabs at once — with guardrails intent classification."""
-    client = get_client(x_gemini_key)   # 401 if no user key and no .env key
     if vectorstore is None:
         raise HTTPException(status_code=503, detail="قاعدة البيانات لم تُحمَّل بعد.")
 
@@ -590,12 +562,12 @@ async def ask_all_madhhabs(req: QuestionRequest, x_gemini_key: Optional[str] = H
     print(f"[Bayyina] /ask-all lang requested={req.lang!r} resolved={lang!r}")
 
     # ── GUARDRAILS: Classify intent first ──
-    intent = await classify_intent(req.question, client)
+    intent = await classify_intent(req.question)
 
     if intent == "GENERAL":
         async def general_stream():
             yield "data: [GENERAL_START]\n\n"
-            async for chunk in stream_general_response(req.question, lang, client):
+            async for chunk in stream_general_response(req.question, lang):
                 yield chunk
             yield "data: [GENERAL_END]\n\n"
             yield "data: [ALL_DONE]\n\n"
@@ -609,14 +581,14 @@ async def ask_all_madhhabs(req: QuestionRequest, x_gemini_key: Optional[str] = H
     # ── FIQH: embed the query ONCE, reuse the vector for all 4 madhhabs ──
     loop = asyncio.get_event_loop()
     try:
-        query_vec = await loop.run_in_executor(None, GeminiEmbeddings(client).embed_query, req.question)
+        query_vec = await loop.run_in_executor(None, embeddings.embed_query, req.question)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Embedding failed: {e}")
 
     async def combined_stream():
         for m in MADHHABS:
             yield f"data: [MADHHAB_START:{m}]\n\n"
-            async for chunk in stream_answer(req.question, m, lang, query_vec=query_vec, client=client):
+            async for chunk in stream_answer(req.question, m, lang, query_vec=query_vec):
                 yield chunk
             yield f"data: [MADHHAB_END:{m}]\n\n"
             await asyncio.sleep(1.5)  # Prevent upstream 429 rate limit
