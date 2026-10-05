@@ -1450,3 +1450,29 @@ textarea, input { font-family: inherit; }
 @media (max-width: 560px) {
   .viewer-toolbar { flex-wrap: wrap; justify-content: center; }
 }
+
+/* ════════════════════════════════════════════
+   17. WELCOME SCREEN FITS WITHOUT SCROLLING
+   ════════════════════════════════════════════ */
+/* The input bar is not overlaid on the chat, so the big bottom padding only forced a scrollbar */
+.chat-container { padding-bottom: 24px; }
+
+.welcome-wrap {
+  flex: 0 0 auto;
+  margin: auto;            /* centers vertically & horizontally, never clips the top */
+  padding: 16px 24px;
+  gap: 14px;
+}
+.welcome-title { font-size: clamp(24px, 4vw, 38px); }
+.welcome-subtitle { font-size: 15px; }
+
+/* Short screens (laptops, landscape phones) */
+@media (max-height: 760px) {
+  .welcome-wrap { gap: 10px; padding: 8px 20px; }
+  .welcome-title { font-size: clamp(22px, 3.4vw, 32px); }
+  .welcome-desc { font-size: 12px; line-height: 1.7; }
+}
+@media (max-height: 600px) {
+  .welcome-desc { display: none; }
+  .suggestion-pill { padding: 6px 14px; }
+}
