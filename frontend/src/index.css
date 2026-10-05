@@ -1396,3 +1396,57 @@ textarea, input { font-family: inherit; }
   height: 40px; padding: 0 16px; border-radius: var(--radius-pill);
   border: 1.5px solid #ef4444; background: transparent; color: #ef4444;
 }
+
+
+/* ════════════════════════════════════════════
+   16. BOOK PAGE VIEWER
+   ════════════════════════════════════════════ */
+.page-btn {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 1.5px solid var(--border); background: transparent;
+  color: var(--brand-gold);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: all var(--transition);
+}
+.page-btn svg { width: 15px; height: 15px; fill: currentColor; }
+.page-btn:hover { border-color: var(--brand-gold); background: var(--brand-gold-faint); transform: scale(1.08); }
+
+.viewer-panel {
+  width: min(820px, 100%);
+  height: min(92vh, 1000px);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  animation: fadeInUp 0.25s ease both;
+}
+.viewer-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.viewer-toolbar .ctrl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.viewer-chips { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.page-chip {
+  min-width: 34px; height: 28px; padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1.5px solid var(--border); background: var(--bg-body);
+  color: var(--text-secondary); font-size: 12.5px; font-weight: 600;
+}
+.page-chip.active { background: var(--btn-primary-bg); color: var(--brand-gold-light); border-color: var(--brand-gold); }
+.viewer-body {
+  flex: 1; overflow: auto; padding: 14px;
+  background: var(--bg-muted-light);
+  display: flex; justify-content: center; align-items: flex-start;
+}
+.viewer-img { max-width: 100%; height: auto; background: #fff; border-radius: var(--radius-xs); box-shadow: var(--shadow-sm); }
+.viewer-open {
+  text-align: center; padding: 8px; font-size: 12px;
+  color: var(--accent); text-decoration: none;
+  border-top: 1px solid var(--border-soft);
+}
+@media (max-width: 560px) {
+  .viewer-toolbar { flex-wrap: wrap; justify-content: center; }
+}

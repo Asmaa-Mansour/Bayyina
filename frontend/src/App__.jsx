@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, createContext, useContext } from 'react';
-import { streamAllMadhhabs } from './api';
+import { streamAllMadhhabs, getApiKey, setApiKey, clearApiKey, validateApiKey } from './api';
 
 // ══════════════════════════════════════════════════════════
 // TRANSLATIONS (AR / EN)
@@ -36,6 +36,11 @@ const T = {
     switchToLight:    'فاتح',
     errorApi:         'خطأ في الاتصال بالخادم. تأكد من تشغيل الـ Backend.',
     sourcesPanelTitle:'مصادر بيّنة',
+    apiKeyBtn: 'مفتاح API', apiKeyTitle: 'مفتاح Gemini API',
+    apiKeyDesc: 'أدخل مفتاحك الخاص. يُحفظ في متصفحك فقط ويُرسل مع كل سؤال.',
+    apiKeyPlaceholder: 'الصق المفتاح هنا...', apiKeySave: 'حفظ', apiKeyRemove: 'حذف المفتاح',
+    apiKeyInvalid: 'المفتاح غير صالح أو لا يمكن استخدامه.', apiKeyChecking: 'جاري التحقق...',
+    apiKeyActive: 'يوجد مفتاح محفوظ', apiKeyShow: 'إظهار', apiKeyHide: 'إخفاء',
     madhhabs: [
       { key: 'hanafi',  label: 'المذهب الحنفي'  },
       { key: 'maliki',  label: 'المذهب المالكي' },
@@ -86,6 +91,11 @@ const T = {
     switchToLight:    'Light',
     errorApi:         'Cannot connect to the server. Make sure the Backend is running.',
     sourcesPanelTitle:'Bayyina Sources',
+    apiKeyBtn: 'API Key', apiKeyTitle: 'Gemini API Key',
+    apiKeyDesc: 'Enter your own key. It is stored only in your browser and sent with each question.',
+    apiKeyPlaceholder: 'Paste your key here...', apiKeySave: 'Save', apiKeyRemove: 'Remove key',
+    apiKeyInvalid: 'The key is invalid or unusable.', apiKeyChecking: 'Checking...',
+    apiKeyActive: 'A key is saved', apiKeyShow: 'Show', apiKeyHide: 'Hide',
     madhhabs: [
       { key: 'hanafi',  label: 'Hanafi'  },
       { key: 'maliki',  label: 'Maliki'  },
@@ -157,6 +167,9 @@ const Icon = {
   Globe: () => (
     <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
   ),
+  Key: () => (
+    <svg viewBox="0 0 24 24"><path d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
+  ),
   Close: () => (
     <svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
   )
@@ -165,7 +178,7 @@ const Icon = {
 // ══════════════════════════════════════════════════════════
 // SIDEBAR
 // ══════════════════════════════════════════════════════════
-function Sidebar({ isOpen, onClose, onClear, onOpenSources }) {
+function Sidebar({ isOpen, onClose, onClear, onOpenSources, onOpenKey, hasKey }) {
   const { lang }  = useLang();
   const { theme } = useTheme();
   const t = T[lang];
@@ -197,8 +210,13 @@ function Sidebar({ isOpen, onClose, onClear, onOpenSources }) {
         <button className="sidebar-btn" title={t.sources} onClick={onOpenSources}>
           <Icon.Book />
         </button>
-        <button className="sidebar-btn" title={t.favorites}>
-          <Icon.Star />
+        <button
+          id="key-btn"
+          className={`sidebar-btn${hasKey ? ' has-key' : ''}`}
+          title={t.apiKeyBtn}
+          onClick={onOpenKey}
+        >
+          <Icon.Key />
         </button>
 
         <div className="sidebar-spacer" />
@@ -641,6 +659,78 @@ function InputArea({ onSubmit, isLoading }) {
 }
 
 // ══════════════════════════════════════════════════════════
+// API KEY MODAL
+// ══════════════════════════════════════════════════════════
+function ApiKeyModal({ isOpen, onClose, onChange }) {
+  const { lang } = useLang();
+  const t = T[lang];
+  const [val, setVal]   = useState('');
+  const [show, setShow] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState('');
+  const hasKey = Boolean(getApiKey());
+
+  useEffect(() => { if (isOpen) { setVal(''); setErr(''); setShow(false); } }, [isOpen]);
+  if (!isOpen) return null;
+
+  const save = async () => {
+    const k = val.trim();
+    if (!k) return;
+    setBusy(true); setErr('');
+    try {
+      await validateApiKey(k);
+      setApiKey(k);
+      onChange();
+      onClose();
+    } catch {
+      setErr(t.apiKeyInvalid);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = () => { clearApiKey(); onChange(); onClose(); };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="key-modal" onClick={e => e.stopPropagation()} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+        <div className="sources-header">
+          <h2 className="sources-title"><Icon.Key />{t.apiKeyTitle}</h2>
+          <button className="sources-close" onClick={onClose}><Icon.Close /></button>
+        </div>
+        <div className="key-modal-body">
+          <p className="key-desc">{t.apiKeyDesc}</p>
+          {hasKey && <p className="key-active">● {t.apiKeyActive}</p>}
+          <div className="key-input-row">
+            <input
+              className="key-input"
+              type={show ? 'text' : 'password'}
+              value={val}
+              placeholder={t.apiKeyPlaceholder}
+              onChange={e => setVal(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && save()}
+              autoComplete="off"
+              spellCheck={false}
+              dir="ltr"
+            />
+            <button className="ctrl-btn" onClick={() => setShow(x => !x)}>
+              {show ? t.apiKeyHide : t.apiKeyShow}
+            </button>
+          </div>
+          {err && <p className="key-error">{err}</p>}
+          <div className="key-actions">
+            <button className="key-save" onClick={save} disabled={!val.trim() || busy}>
+              {busy ? t.apiKeyChecking : t.apiKeySave}
+            </button>
+            {hasKey && <button className="key-remove" onClick={remove}>{t.apiKeyRemove}</button>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════
 // ROOT APP
 // ══════════════════════════════════════════════════════════
 export default function App() {
@@ -654,8 +744,11 @@ export default function App() {
   const [isLoading,  setIsLoading]  = useState(false);
   const [sidebarOpen,setSidebarOpen]= useState(false);
   const [sourcesOpen,setSourcesOpen]= useState(false);
+  const [keyOpen,    setKeyOpen]    = useState(false);
+  const [hasKey,     setHasKey]     = useState(() => Boolean(getApiKey()));
 
-  const bottomRef = useRef(null);
+  const bottomRef  = useRef(null);
+  const pendingRef = useRef(null);   // question waiting for the user to enter a key
 
   /* ── Apply theme & lang to <html> ── */
   useEffect(() => {
@@ -745,12 +838,20 @@ export default function App() {
       }
     } catch (err) {
       console.error(err);
-      update(m => ({
-        ...m,
-        statuses: { hanafi: STATUS.ERROR, hanbali: STATUS.ERROR,
-                    shafii: STATUS.ERROR,  maliki: STATUS.ERROR },
-        generalStatus: m.isGeneral ? STATUS.ERROR : m.generalStatus,
-      }));
+      if (err.status === 401) {
+        // No key yet: drop the failed message, remember the question, ask for a key.
+        // The question is re-sent automatically once a valid key is saved.
+        pendingRef.current = question;
+        setMessages(prev => prev.filter(m => m.id !== msgId));
+        setKeyOpen(true);
+      } else {
+        update(m => ({
+          ...m,
+          statuses: { hanafi: STATUS.ERROR, hanbali: STATUS.ERROR,
+                      shafii: STATUS.ERROR,  maliki: STATUS.ERROR },
+          generalStatus: m.isGeneral ? STATUS.ERROR : m.generalStatus,
+        }));
+      }
     } finally {
       // Flush any remaining STREAMING → DONE
       update(m => {
@@ -786,6 +887,8 @@ export default function App() {
           onClose={() => setSidebarOpen(false)}
           onClear={handleClear}
           onOpenSources={() => setSourcesOpen(true)}
+          onOpenKey={() => setKeyOpen(true)}
+          hasKey={hasKey}
         />
 
         {/* Main */}
@@ -810,6 +913,20 @@ export default function App() {
 
         {/* Sources Panel Modal */}
         <SourcesPanel isOpen={sourcesOpen} onClose={() => setSourcesOpen(false)} />
+
+        {/* API Key Modal */}
+        <ApiKeyModal
+          isOpen={keyOpen}
+          onClose={() => { pendingRef.current = null; setKeyOpen(false); }}
+          onChange={() => {
+            setHasKey(Boolean(getApiKey()));
+            const q = pendingRef.current;
+            if (q && getApiKey()) {          // retry the question that was blocked
+              pendingRef.current = null;
+              setTimeout(() => handleQuestion(q), 0);
+            }
+          }}
+        />
 
       </div>
     </ThemeCtx.Provider>

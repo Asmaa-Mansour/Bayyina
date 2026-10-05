@@ -74,6 +74,59 @@ class Doc:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def to_page(v) -> Optional[int]:
+    """Printed page number (handles Arabic-Indic digits). None if not a number."""
+    try:
+        n = int(str(v).strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")))
+        return n if n > 0 else None
+    except (ValueError, TypeError):
+        return None
+
+
+_DIACRITICS = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]")
+
+
+def _norm_ar(t: str) -> str:
+    """Normalize Arabic for fuzzy substring matching (no tashkeel, unified letters, no punctuation)."""
+    t = _DIACRITICS.sub("", t or "")
+    t = re.sub(r"[إأآٱ]", "ا", t).replace("ى", "ي").replace("ة", "ه")
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def find_answer_page(answer: str, docs: List["Doc"]) -> Optional[int]:
+    """Printed page that holds the answer.
+    1) find the model's verbatim quote inside the retrieved source texts (most reliable),
+    2) otherwise trust the page number the model wrote, if it is one of the retrieved pages."""
+    if re.search(r"No answer was found|No answer found|لا توجد إجابة|لم يتم العثور", answer):
+        return None
+
+    # 1) locate the quote
+    i = answer.find("النص الحرفي")
+    if i >= 0:
+        quote = answer[i + len("النص الحرفي"):].lstrip(" :*\n")
+        segs = [_norm_ar(x) for x in re.split(r"\.\.\.|…", quote)]
+        segs = sorted([x for x in segs if len(x) >= 15], key=len, reverse=True)
+        norm_docs = [(_norm_ar(d.page_content), d) for d in docs]
+        for seg in segs:
+            probe = seg[:60]
+            for text, d in norm_docs:
+                if probe in text:
+                    pg = to_page(d.metadata.get("page_from"))
+                    if pg:
+                        return pg
+
+    # 2) page number written by the model
+    retrieved = {to_page(d.metadata.get("page_from")) for d in docs}
+    norm = answer.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    m = re.search(r"(?:Page|الصفحة)[^\n\d]*(\d[^\n]*)", norm, re.I)
+    if m:
+        for n in re.findall(r"\d+", m.group(1)):
+            if int(n) in retrieved:
+                return int(n)
+    return None
+
+
 def open_collection():
     """Open (or create) the Chroma collection directly, without langchain.
     'langchain' is the collection name used by the earlier langchain-based build,
@@ -399,10 +452,17 @@ Reminder: write everything in ENGLISH using exactly the template from your instr
             ),
         )
 
+        full_answer = ""
         for chunk in completion:
             if chunk.text:
+                full_answer += chunk.text
                 escaped = chunk.text.replace("\n", "\\n")
                 yield f"data: {escaped}\n\n"
+
+        # Which book page contains the answer? (frontend shows that page image)
+        page = find_answer_page(full_answer, relevant_docs)
+        if page:
+            yield f"data: [PAGES:{page}]\n\n"
 
         yield "data: [DONE]\n\n"
 
@@ -563,7 +623,6 @@ async def validate_key(x_gemini_key: Optional[str] = Header(None)):
 
 @app.post("/ask")
 async def ask_question(req: QuestionRequest, x_gemini_key: Optional[str] = Header(None)):
-    print(x_gemini_key)
     client = get_client(x_gemini_key)
     if vectorstore is None:
         raise HTTPException(status_code=503, detail="قاعدة البيانات لم تُحمَّل بعد.")

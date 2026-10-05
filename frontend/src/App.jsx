@@ -41,6 +41,8 @@ const T = {
     apiKeyPlaceholder: 'الصق المفتاح هنا...', apiKeySave: 'حفظ', apiKeyRemove: 'حذف المفتاح',
     apiKeyInvalid: 'المفتاح غير صالح أو لا يمكن استخدامه.', apiKeyChecking: 'جاري التحقق...',
     apiKeyActive: 'يوجد مفتاح محفوظ', apiKeyShow: 'إظهار', apiKeyHide: 'إخفاء',
+    viewPage: 'عرض صفحة الكتاب', pageLabel: 'صفحة', prevPage: 'السابقة', nextPage: 'التالية',
+    pageMissing: 'تعذر تحميل صورة الصفحة', openNewTab: 'فتح في تبويب جديد',
     madhhabs: [
       { key: 'hanafi',  label: 'المذهب الحنفي'  },
       { key: 'maliki',  label: 'المذهب المالكي' },
@@ -96,6 +98,8 @@ const T = {
     apiKeyPlaceholder: 'Paste your key here...', apiKeySave: 'Save', apiKeyRemove: 'Remove key',
     apiKeyInvalid: 'The key is invalid or unusable.', apiKeyChecking: 'Checking...',
     apiKeyActive: 'A key is saved', apiKeyShow: 'Show', apiKeyHide: 'Hide',
+    viewPage: 'View book page', pageLabel: 'Page', prevPage: 'Previous', nextPage: 'Next',
+    pageMissing: 'Could not load the page image', openNewTab: 'Open in new tab',
     madhhabs: [
       { key: 'hanafi',  label: 'Hanafi'  },
       { key: 'maliki',  label: 'Maliki'  },
@@ -166,6 +170,9 @@ const Icon = {
   ),
   Globe: () => (
     <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/></svg>
+  ),
+  Image: () => (
+    <svg viewBox="0 0 24 24"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
   ),
   Key: () => (
     <svg viewBox="0 0 24 24"><path d="M12.65 10A5.99 5.99 0 0 0 7 6c-3.31 0-6 2.69-6 6s2.69 6 6 6a5.99 5.99 0 0 0 5.65-4H17v4h4v-4h2v-4H12.65zM7 14c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2z"/></svg>
@@ -429,12 +436,57 @@ function FormattedText({ text }) {
 }
 
 // ══════════════════════════════════════════════════════════
+// BOOK PAGE IMAGE (viewer)
+// Images live in  public/pages/<madhhab>/<printed page>.webp  (made by pdf_to_pages.py)
+// The backend tells us which page holds the answer.
+// ══════════════════════════════════════════════════════════
+const PAGES_BASE = `${import.meta.env.BASE_URL}pages`;
+
+function PageViewer({ madhhab, label, page, onClose }) {
+  const { lang } = useLang();
+  const t = T[lang];
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const h = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+
+  const src = `${PAGES_BASE}/${madhhab}/${page}.webp`;
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="viewer-panel" onClick={e => e.stopPropagation()} dir={lang === 'ar' ? 'rtl' : 'ltr'}>
+        <div className="sources-header">
+          <h2 className="sources-title"><Icon.Image />{label} · {t.pageLabel} {page}</h2>
+          <button className="sources-close" onClick={onClose}><Icon.Close /></button>
+        </div>
+
+        <div className="viewer-body">
+          {failed ? (
+            <p className="key-error" dir="ltr">{t.pageMissing}: pages/{madhhab}/{page}.webp</p>
+          ) : (
+            <img src={src} alt={`${label} ${page}`} className="viewer-img" onError={() => setFailed(true)} />
+          )}
+        </div>
+        <a className="viewer-open" href={src} target="_blank" rel="noreferrer">{t.openNewTab}</a>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════
 // MADHHAB CARD
 // ══════════════════════════════════════════════════════════
-function MadhhabCard({ madhhab, text, status }) {
+function MadhhabCard({ madhhab, text, status, pages, onViewPage }) {
   const { lang }    = useLang();
   const [exp, setExp] = useState(false);
   const t = T[lang];
+
+  // Page that contains the answer (sent by the backend)
+  const page    = pages?.[0];
+  const canView = status === STATUS.DONE && Boolean(page);
 
   const hasContent = Boolean(text?.trim());
   const isLong = text?.length > 380;
@@ -462,6 +514,15 @@ function MadhhabCard({ madhhab, text, status }) {
       <div className="card-header">
         <div className="card-icon"><Icon.Moon /></div>
         <span className="card-name">{madhhab.label}</span>
+        {canView && (
+          <button
+            className="page-btn"
+            title={t.viewPage}
+            onClick={() => onViewPage({ madhhab: madhhab.key, label: madhhab.label, page })}
+          >
+            <Icon.Image />
+          </button>
+        )}
         {status !== STATUS.IDLE && (
           <div className="card-status">
             <span className={`status-dot ${dotClass}`} />
@@ -553,7 +614,7 @@ function GeneralCard({ text, status }) {
 // ══════════════════════════════════════════════════════════
 // MESSAGE BLOCK
 // ══════════════════════════════════════════════════════════
-function MessageBlock({ msg }) {
+function MessageBlock({ msg, onViewPage }) {
   const { lang } = useLang();
   const madhhabList = T[lang].madhhabs;
 
@@ -590,6 +651,8 @@ function MessageBlock({ msg }) {
               madhhab={m}
               text={msg.answers[m.key] ?? ''}
               status={msg.statuses[m.key] ?? STATUS.IDLE}
+              pages={msg.pages?.[m.key]}
+              onViewPage={onViewPage}
             />
           ))}
         </div>
@@ -745,6 +808,7 @@ export default function App() {
   const [sidebarOpen,setSidebarOpen]= useState(false);
   const [sourcesOpen,setSourcesOpen]= useState(false);
   const [keyOpen,    setKeyOpen]    = useState(false);
+  const [viewer,     setViewer]     = useState(null);   // page-image viewer
   const [hasKey,     setHasKey]     = useState(() => Boolean(getApiKey()));
 
   const bottomRef  = useRef(null);
@@ -788,6 +852,7 @@ export default function App() {
       isGeneral: null,       // null = classifying intent
       generalAnswer: '',
       generalStatus: STATUS.IDLE,
+      pages: {},             // retrieved book pages per madhhab
     }]);
     setIsLoading(true);
 
@@ -796,7 +861,7 @@ export default function App() {
 
     try {
       for await (const ev of streamAllMadhhabs(question, reqLang)) {
-        const { type, madhhab, text } = ev;
+        const { type, madhhab, text, pages } = ev;
 
         // ── GUARDRAILS: general single-card events ──
         if (type === 'general_start') {
@@ -815,6 +880,10 @@ export default function App() {
           }));
         } else if (type === 'general_end') {
           update(m => ({ ...m, generalStatus: STATUS.DONE }));
+
+        // ── retrieved book pages for a madhhab ──
+        } else if (type === 'pages') {
+          update(m => ({ ...m, pages: { ...m.pages, [madhhab]: pages } }));
 
         // ── FIQH: normal 4-madhhab events ──
         } else if (type === 'start') {
@@ -901,7 +970,7 @@ export default function App() {
               <WelcomeScreen onSuggest={handleQuestion} />
             ) : (
               messages.map(msg => (
-                <MessageBlock key={msg.id} msg={msg} />
+                <MessageBlock key={msg.id} msg={msg} onViewPage={setViewer} />
               ))
             )}
             <div ref={bottomRef} />
@@ -913,6 +982,9 @@ export default function App() {
 
         {/* Sources Panel Modal */}
         <SourcesPanel isOpen={sourcesOpen} onClose={() => setSourcesOpen(false)} />
+
+        {/* Book page viewer */}
+        {viewer && <PageViewer key={`${viewer.madhhab}-${viewer.page}`} {...viewer} onClose={() => setViewer(null)} />}
 
         {/* API Key Modal */}
         <ApiKeyModal

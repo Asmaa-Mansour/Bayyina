@@ -87,6 +87,14 @@ export async function* streamAllMadhhabs(question, lang = 'ar') {
         continue;
       }
 
+      // ── Retrieved book pages for this madhhab (used for the page-image viewer) ──
+      const pagesMatch = payload.match(/^\[PAGES:([\d,]*)\]$/);
+      if (pagesMatch) {
+        const pages = pagesMatch[1].split(',').filter(Boolean).map(Number);
+        yield { type: 'pages', madhhab: currentMadhhab, pages };
+        continue;
+      }
+
       if (currentMadhhab) {
         // Unescape newlines
         const text = payload.replace(/\\n/g, '\n');
