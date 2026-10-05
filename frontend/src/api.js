@@ -1,8 +1,12 @@
 // Utility: parse SSE stream for all-madhhabs endpoint
 // Returns chunks tagged by madhhab, or a 'general' single response
 
+// Backend URL: set VITE_API_URL at build time (Render static site env var).
+// Falls back to localhost for local development.
+const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/+$/, '');
+
 export async function* streamAllMadhhabs(question, lang = 'ar') {
-  const response = await fetch('http://localhost:8000/ask-all', {
+  const response = await fetch(`${API_URL}/ask-all`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ question, madhhab: 'all', lang }), // madhhab is required by Pydantic model
