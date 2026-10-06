@@ -689,12 +689,12 @@ async def ask_all_madhhabs(req: QuestionRequest, x_gemini_key: Optional[str] = H
 
 
 # ==========================================
-# Build the index offline:  python main_gemini.py build
+# Build the index offline:  python main.py build
 # ==========================================
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "build":
         build_index()
         print(f"Deploy the '{DB_DIR}' folder together with the code.")
     else:
-        print("Usage: python main_gemini.py build   (to build the index)")
-        print("Run the server with: uvicorn main_gemini:app --host 0.0.0.0 --port 8000")
+        print("Usage: python main.py build   (to build the index)")
+        print("Run the server with: uvicorn main:app --host 0.0.0.0 --port 8000")
