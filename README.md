@@ -66,7 +66,6 @@ pip install -r requirements.txt
 
 # تشغيل خادم الـ API
 uvicorn main:app --reload --port 8000
-# أو يمكنك ببساطة استخدام السكريبت الجاهز: .\start-backend.ps1
 ```
 
 سيبدأ الخادم على: **http://localhost:8000**
@@ -82,7 +81,6 @@ npm install
 
 # تشغيل خادم الواجهة
 npm run dev
-# أو يمكنك ببساطة استخدام السكريبت الجاهز: .\start-frontend.ps1
 ```
 
 سيفتح الموقع على: **http://localhost:5173**
@@ -175,7 +173,6 @@ pip install -r requirements.txt
 
 # Run the API server
 uvicorn main:app --reload --port 8000
-# Alternatively, you can run the ready-made script: .\start-backend.ps1
 ```
 
 The server will start at: **http://localhost:8000**
@@ -191,7 +188,6 @@ npm install
 
 # Start the frontend development server
 npm run dev
-# Alternatively, you can run the ready-made script: .\start-frontend.ps1
 ```
 
 The website will be available at: **http://localhost:5173**
